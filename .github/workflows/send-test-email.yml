@@ -1,0 +1,37 @@
+name: Send Gmail test email
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  send-test-email:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send test email
+        env:
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          from email.message import EmailMessage
+
+          username = os.environ["GMAIL_USERNAME"]
+          app_password = os.environ["GMAIL_APP_PASSWORD"]
+
+          message = EmailMessage()
+          message["Subject"] = "GitHub Actions test email"
+          message["From"] = username
+          message["To"] = username
+          message.set_content(
+              "This is a test email sent from GitHub Actions using Gmail SMTP."
+          )
+
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+              smtp.login(username, app_password)
+              smtp.send_message(message)
+          PY
