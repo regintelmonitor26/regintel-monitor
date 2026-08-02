@@ -1,6 +1,6 @@
 # regintel-monitor
 
-厚生労働省の中医協議事録と、PMDAのICHガイドライン進捗状況リンクを監視し、変更をGmailで通知します。
+厚生労働省の中医協議事録、PMDAのICHガイドライン進捗状況、JPMAの3つの情報一覧を監視し、変更をGmailで通知します。
 
 ## 動作
 
@@ -8,6 +8,9 @@
 
 - MHLW: https://www.mhlw.go.jp/stf/shingi/shingi-chuo_128154.html
 - PMDA: https://www.pmda.go.jp/int-activities/int-harmony/ich/0070.html
+- JPMA ICH: https://www.jpma.or.jp/information/ich/index.html
+- JPMA成果物: https://www.jpma.or.jp/information/evaluation/results/allotment/index.html#/
+- JPMA連絡: https://www.jpma.or.jp/information/evaluation/results/message/index.html#/
 
 ### MHLW議事録
 
@@ -25,6 +28,10 @@
 2. 見出し直後の最初のリンク1件について、リンク文字列とURLを監視します。
 3. `data/pmda_ich_link.json`が存在しない初回実行では、現在値を保存してメールは送信しません。
 4. 2回目以降、リンク文字列またはURLが変わった場合だけ、変更前後の文字列と新しいURLを通知します。
+
+### JPMA
+
+本文内の「お知らせ・更新情報」「成果物一覧（新着順）」「連絡一覧」だけを監視します。各一覧のリンク文字列とURLを対象別の状態ファイルへ保存し、初回は通知しません。2回目以降に追加されたリンクだけを通知し、並び順だけの変更では通知しません。複数のJPMA対象に新着がある場合は1通にまとめます。
 
 ## GitHub Secrets
 
@@ -74,5 +81,8 @@ python monitor.py
 
 - `data/processed_urls.json`: MHLWの処理済み議事録URL
 - `data/pmda_ich_link.json`: PMDAのリンク文字列とURL
+- `data/jpma_ich_links.json`: JPMA ICHのお知らせリンク
+- `data/jpma_results_links.json`: JPMA成果物リンク
+- `data/jpma_messages_links.json`: JPMA連絡リンク
 
 状態ファイルを削除すると、該当する監視対象だけが次回実行時に初回扱いとなり、現在値を保存して通知せず終了します。

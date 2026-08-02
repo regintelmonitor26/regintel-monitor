@@ -24,6 +24,13 @@ STATE_PATH = Path("data/processed_urls.json")
 PMDA_TARGET_URL = "https://www.pmda.go.jp/int-activities/int-harmony/ich/0070.html"
 PMDA_STATE_PATH = Path("data/pmda_ich_link.json")
 PMDA_HEADING = "ガイドラインの進捗状況"
+JPMA_ICH_URL = "https://www.jpma.or.jp/information/ich/index.html"
+JPMA_RESULTS_URL = (
+    "https://www.jpma.or.jp/information/evaluation/results/allotment/index.html"
+)
+JPMA_MESSAGES_URL = (
+    "https://www.jpma.or.jp/information/evaluation/results/message/index.html"
+)
 REQUEST_TIMEOUT = 30
 USER_AGENT = "regintel-monitor/1.0 (+https://github.com/regintelmonitor26/regintel-monitor)"
 
@@ -183,6 +190,87 @@ class PmdaIchScraper:
         return parsed.scheme in {"http", "https"} and parsed.hostname == "www.pmda.go.jp"
 
 
+class JpmaScraper:
+    """Extract links only from the three designated JPMA main-content lists."""
+
+    def __init__(self, http_client: HttpClient) -> None:
+        self.http_client = http_client
+
+    def get_ich_links(self) -> list[TrackedLink]:
+        content = self._main_content(JPMA_ICH_URL)
+        heading = self._find_heading(content, "お知らせ・更新情報")
+        link_list = heading.find_next("ul", class_="list-news")
+        if link_list is None or content not in link_list.parents:
+            raise RuntimeError("JPMA ICHのお知らせ・更新情報一覧を特定できません。")
+        return self._extract_links(link_list, JPMA_ICH_URL)
+
+    def get_results_links(self) -> list[TrackedLink]:
+        content = self._main_content(JPMA_RESULTS_URL)
+        heading = content.find("h1")
+        if heading is None or "成果物" not in self._normalize(heading.get_text(" ")):
+            raise RuntimeError("JPMA成果物一覧の見出しを特定できません。")
+        link_list = content.select_one(".link-list-a")
+        if link_list is None:
+            raise RuntimeError("JPMA成果物一覧（新着順）を特定できません。")
+        return self._extract_links(link_list, JPMA_RESULTS_URL)
+
+    def get_message_links(self) -> list[TrackedLink]:
+        content = self._main_content(JPMA_MESSAGES_URL)
+        heading = content.find("h1")
+        if heading is None or "連絡一覧" not in self._normalize(heading.get_text(" ")):
+            raise RuntimeError("JPMA連絡一覧の見出しを特定できません。")
+        link_list = content.select_one(".link-list-a")
+        if link_list is None:
+            raise RuntimeError("JPMA連絡一覧を特定できません。")
+        return self._extract_links(link_list, JPMA_MESSAGES_URL)
+
+    def _main_content(self, url: str):
+        soup = BeautifulSoup(self.http_client.get_text(url), "html.parser")
+        content = soup.select_one("main")
+        if content is None:
+            raise RuntimeError("JPMAページの本文領域を特定できません。")
+        return content
+
+    def _find_heading(self, content, text: str):
+        heading = next(
+            (
+                item
+                for item in content.find_all(["h1", "h2", "h3", "h4"])
+                if self._normalize(item.get_text(" ")) == text
+            ),
+            None,
+        )
+        if heading is None:
+            raise RuntimeError(f"JPMAページに見出し「{text}」がありません。")
+        return heading
+
+    def _extract_links(self, container, base_url: str) -> list[TrackedLink]:
+        links: list[TrackedLink] = []
+        seen: set[tuple[str, str]] = set()
+        for anchor in container.select("a[href]"):
+            text = self._normalize(anchor.get_text(" ", strip=True))
+            url = urljoin(base_url, anchor["href"])
+            key = (text, url)
+            if text and self._is_jpma_url(url) and key not in seen:
+                links.append(TrackedLink(text=text, url=url))
+                seen.add(key)
+        if not links:
+            raise RuntimeError("JPMA対象一覧からリンクを取得できませんでした。")
+        return links
+
+    @staticmethod
+    def _normalize(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _is_jpma_url(url: str) -> bool:
+        parsed = urlparse(url)
+        return parsed.scheme in {"http", "https"} and parsed.hostname in {
+            "www.jpma.or.jp",
+            "jpma.or.jp",
+        }
+
+
 class ProcessedUrlStore:
     """Load and atomically save the set of already processed transcript URLs."""
 
@@ -245,6 +333,42 @@ class TrackedLinkStore:
         temporary_path.replace(self.path)
 
 
+class TrackedLinkListStore:
+    """Store an ordered snapshot while comparing links as an unordered set."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def load(self) -> list[TrackedLink]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"状態ファイルを読み込めません: {self.path}") from exc
+        if not isinstance(data, list) or not all(
+            isinstance(item, dict)
+            and set(item) == {"text", "url"}
+            and isinstance(item["text"], str)
+            and isinstance(item["url"], str)
+            for item in data
+        ):
+            raise RuntimeError(f"状態ファイルの形式が不正です: {self.path}")
+        return [TrackedLink(item["text"], item["url"]) for item in data]
+
+    def save(self, links: list[TrackedLink]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_suffix(".json.tmp")
+        payload = json.dumps(
+            [{"text": item.text, "url": item.url} for item in links],
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
+        temporary_path.write_text(payload, encoding="utf-8")
+        temporary_path.replace(self.path)
+
+
 class GmailNotifier:
     """Send new transcript titles and URLs as a multipart email through Gmail."""
 
@@ -300,6 +424,36 @@ class GmailNotifier:
         message["To"] = ", ".join(self.recipients)
         message.set_content(self._test_plain_body(links))
         message.add_alternative(self._test_html_body(links), subtype="html")
+        self._deliver(message)
+
+    def send_jpma_additions(
+        self, additions: dict[str, list[TrackedLink]]
+    ) -> None:
+        message = EmailMessage()
+        message["Subject"] = "【JPMA】Regulatory Monitor 新着通知"
+        message["From"] = self.username
+        message["To"] = ", ".join(self.recipients)
+        plain_sections = []
+        html_sections = []
+        for label, links in additions.items():
+            plain_sections.append(
+                f"【{label}】\n"
+                + "\n\n".join(f"{item.text}\n{item.url}" for item in links)
+            )
+            html_sections.append(
+                f"<h2>【{html.escape(label)}】</h2>"
+                + "".join(
+                    f'<p>{html.escape(item.text)}<br><a href="'
+                    f'{html.escape(item.url, quote=True)}">{html.escape(item.url)}</a></p>'
+                    for item in links
+                )
+            )
+        message.set_content("\n\n".join(plain_sections))
+        message.add_alternative(
+            '<!doctype html><html lang="ja"><body>' + "".join(html_sections)
+            + "</body></html>",
+            subtype="html",
+        )
         self._deliver(message)
 
     def _deliver(self, message: EmailMessage) -> None:
@@ -439,6 +593,43 @@ class PmdaIchMonitor:
         LOGGER.info("PMDA ICH進捗状況リンクの変更をメール送信しました。")
 
 
+class JpmaMonitor:
+    """Monitor three independent JPMA lists and aggregate new links."""
+
+    def __init__(self, scraper: JpmaScraper, stores: dict[str, TrackedLinkListStore]):
+        self.scraper = scraper
+        self.stores = stores
+
+    def run(self) -> None:
+        snapshots = {
+            "JPMA ICH": self.scraper.get_ich_links(),
+            "JPMA 成果物一覧": self.scraper.get_results_links(),
+            "JPMA 連絡一覧": self.scraper.get_message_links(),
+        }
+        additions: dict[str, list[TrackedLink]] = {}
+        initialized: set[str] = set()
+        for label, current in snapshots.items():
+            store = self.stores[label]
+            if not store.exists():
+                store.save(current)
+                initialized.add(label)
+                continue
+            previous = {(item.text, item.url) for item in store.load()}
+            new_links = [
+                item for item in current if (item.text, item.url) not in previous
+            ]
+            if new_links:
+                additions[label] = new_links
+
+        if additions:
+            create_notifier().send_jpma_additions(additions)
+
+        for label, current in snapshots.items():
+            if label not in initialized:
+                self.stores[label].save(current)
+        LOGGER.info("JPMA監視を完了しました（新着対象: %d）。", len(additions))
+
+
 class TestNotificationRunner:
     """Send current MHLW and PMDA links without touching monitor state."""
 
@@ -518,8 +709,21 @@ def main() -> None:
         scraper=PmdaIchScraper(http_client),
         store=TrackedLinkStore(),
     )
+    jpma_monitor = JpmaMonitor(
+        scraper=JpmaScraper(http_client),
+        stores={
+            "JPMA ICH": TrackedLinkListStore(Path("data/jpma_ich_links.json")),
+            "JPMA 成果物一覧": TrackedLinkListStore(
+                Path("data/jpma_results_links.json")
+            ),
+            "JPMA 連絡一覧": TrackedLinkListStore(
+                Path("data/jpma_messages_links.json")
+            ),
+        },
+    )
     mhlw_monitor.run()
     pmda_monitor.run()
+    jpma_monitor.run()
 
 
 if __name__ == "__main__":

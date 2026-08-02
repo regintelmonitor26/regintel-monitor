@@ -7,6 +7,11 @@ from unittest.mock import Mock, patch
 
 from monitor import (
     GmailNotifier,
+    JPMA_ICH_URL,
+    JPMA_MESSAGES_URL,
+    JPMA_RESULTS_URL,
+    JpmaMonitor,
+    JpmaScraper,
     MhlwScraper,
     NotificationLink,
     PmdaIchMonitor,
@@ -14,6 +19,7 @@ from monitor import (
     ProcessedUrlStore,
     RegulatoryMonitor,
     TrackedLink,
+    TrackedLinkListStore,
     TrackedLinkStore,
     TestNotificationRunner,
     Transcript,
@@ -107,6 +113,40 @@ class PmdaIchScraperTests(unittest.TestCase):
             scraper.get_progress_link(page_url)
 
 
+class JpmaScraperTests(unittest.TestCase):
+    def test_extracts_only_links_from_each_designated_main_list(self):
+        pages = {
+            JPMA_ICH_URL: """
+                <header><a href="/wrong">wrong</a></header>
+                <main><aside><a href="/menu">menu</a></aside>
+                  <h2>お知らせ・更新情報</h2>
+                  <ul class="list-news">
+                    <li><a href="/ich/one">ICH one</a></li>
+                    <li><a href="/ich/two">ICH two</a></li>
+                  </ul>
+                  <h2>別一覧</h2><a href="/other">other</a>
+                </main>
+            """,
+            JPMA_RESULTS_URL: """
+                <main><h1>医薬品評価委員会の成果物 一覧</h1>
+                  <a href="/breadcrumb">breadcrumb</a>
+                  <div class="link-list-a"><a href="/result/one">Result one</a></div>
+                </main>
+            """,
+            JPMA_MESSAGES_URL: """
+                <main><h1>医薬品評価委員会からの連絡 すべての連絡一覧</h1>
+                  <div class="link-list-a"><a href="/message/one">Message one</a></div>
+                  <footer><a href="/footer">footer</a></footer>
+                </main>
+            """,
+        }
+        scraper = JpmaScraper(FakeHttpClient(pages))
+
+        self.assertEqual([x.text for x in scraper.get_ich_links()], ["ICH one", "ICH two"])
+        self.assertEqual([x.text for x in scraper.get_results_links()], ["Result one"])
+        self.assertEqual([x.text for x in scraper.get_message_links()], ["Message one"])
+
+
 class ProcessedUrlStoreTests(unittest.TestCase):
     def test_round_trip_uses_sorted_unique_json_list(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -137,6 +177,19 @@ class TrackedLinkStoreTests(unittest.TestCase):
                 {"text": link.text, "url": link.url},
             )
 
+
+class TrackedLinkListStoreTests(unittest.TestCase):
+    def test_round_trip_preserves_link_text_and_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TrackedLinkListStore(Path(directory) / "links.json")
+            links = [
+                TrackedLink("one", "https://www.jpma.or.jp/one"),
+                TrackedLink("two", "https://www.jpma.or.jp/two"),
+            ]
+
+            store.save(links)
+
+            self.assertEqual(store.load(), links)
 
 class RegulatoryMonitorTests(unittest.TestCase):
     def test_first_run_saves_all_existing_urls_without_credentials_or_email(self):
@@ -257,6 +310,78 @@ class PmdaIchMonitorTests(unittest.TestCase):
                 notifier.send_pmda_change.assert_called_once_with(previous, current)
                 self.assertEqual(store.load(), current)
                 create_notifier.reset_mock()
+
+
+class JpmaMonitorTests(unittest.TestCase):
+    def _stores(self, directory):
+        return {
+            "JPMA ICH": TrackedLinkListStore(Path(directory) / "ich.json"),
+            "JPMA 成果物一覧": TrackedLinkListStore(Path(directory) / "results.json"),
+            "JPMA 連絡一覧": TrackedLinkListStore(Path(directory) / "messages.json"),
+        }
+
+    @patch("monitor.create_notifier")
+    def test_first_run_saves_each_target_without_notification(self, create_notifier):
+        with tempfile.TemporaryDirectory() as directory:
+            stores = self._stores(directory)
+            scraper = Mock()
+            scraper.get_ich_links.return_value = [
+                TrackedLink("ich", "https://www.jpma.or.jp/ich")
+            ]
+            scraper.get_results_links.return_value = [
+                TrackedLink("result", "https://www.jpma.or.jp/result")
+            ]
+            scraper.get_message_links.return_value = [
+                TrackedLink("message", "https://www.jpma.or.jp/message")
+            ]
+
+            JpmaMonitor(scraper, stores).run()
+
+            create_notifier.assert_not_called()
+            self.assertTrue(all(store.exists() for store in stores.values()))
+
+    @patch("monitor.create_notifier")
+    def test_order_changes_do_not_notify(self, create_notifier):
+        with tempfile.TemporaryDirectory() as directory:
+            stores = self._stores(directory)
+            one = TrackedLink("one", "https://www.jpma.or.jp/one")
+            two = TrackedLink("two", "https://www.jpma.or.jp/two")
+            for store in stores.values():
+                store.save([one, two])
+            scraper = Mock()
+            scraper.get_ich_links.return_value = [two, one]
+            scraper.get_results_links.return_value = [two, one]
+            scraper.get_message_links.return_value = [two, one]
+
+            JpmaMonitor(scraper, stores).run()
+
+            create_notifier.assert_not_called()
+
+    @patch("monitor.create_notifier")
+    def test_new_links_from_changed_targets_are_aggregated_once(self, create_notifier):
+        with tempfile.TemporaryDirectory() as directory:
+            stores = self._stores(directory)
+            old = TrackedLink("old", "https://www.jpma.or.jp/old")
+            new_ich = TrackedLink("new ICH", "https://www.jpma.or.jp/new-ich")
+            new_message = TrackedLink(
+                "new message", "https://www.jpma.or.jp/new-message"
+            )
+            for store in stores.values():
+                store.save([old])
+            scraper = Mock()
+            scraper.get_ich_links.return_value = [new_ich, old]
+            scraper.get_results_links.return_value = [old]
+            scraper.get_message_links.return_value = [new_message, old]
+            notifier = create_notifier.return_value
+
+            JpmaMonitor(scraper, stores).run()
+
+            notifier.send_jpma_additions.assert_called_once_with(
+                {
+                    "JPMA ICH": [new_ich],
+                    "JPMA 連絡一覧": [new_message],
+                }
+            )
 
 
 class TestNotificationRunnerTests(unittest.TestCase):

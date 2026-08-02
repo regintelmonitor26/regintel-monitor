@@ -46,13 +46,22 @@ jobs:
       - name: Commit updated monitor state
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.send_test_email }}
         run: |
-          if [ ! -f data/processed_urls.json ] || [ ! -f data/pmda_ich_link.json ]; then
-            echo "One or more state files were not created."
-            exit 1
-          fi
+          state_files=(
+            data/processed_urls.json
+            data/pmda_ich_link.json
+            data/jpma_ich_links.json
+            data/jpma_results_links.json
+            data/jpma_messages_links.json
+          )
+          for state_file in "${state_files[@]}"; do
+            if [ ! -f "$state_file" ]; then
+              echo "State file was not created: $state_file"
+              exit 1
+            fi
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/processed_urls.json data/pmda_ich_link.json
+          git add "${state_files[@]}"
           if git diff --cached --quiet; then
             echo "Monitor state is unchanged."
             exit 0
