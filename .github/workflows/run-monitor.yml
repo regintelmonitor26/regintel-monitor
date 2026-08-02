@@ -2,6 +2,12 @@ name: Run regulatory monitor
 
 on:
   workflow_dispatch:
+    inputs:
+      send_test_email:
+        description: Send current MHLW and PMDA links without updating state
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '0 21 * * 4' # JST Friday 06:00
 
@@ -34,9 +40,11 @@ jobs:
           GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
+          SEND_TEST_EMAIL: ${{ github.event_name == 'workflow_dispatch' && inputs.send_test_email }}
         run: python monitor.py
 
       - name: Commit updated monitor state
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.send_test_email }}
         run: |
           if [ ! -f data/processed_urls.json ] || [ ! -f data/pmda_ich_link.json ]; then
             echo "One or more state files were not created."

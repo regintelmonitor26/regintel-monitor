@@ -44,6 +44,15 @@ class TrackedLink:
     url: str
 
 
+@dataclass(frozen=True)
+class NotificationLink:
+    """A labeled link rendered in a manual test notification."""
+
+    target_name: str
+    link_text: str
+    url: str
+
+
 class HttpClient:
     """Fetch UTF-8-compatible HTML pages with consistent error handling."""
 
@@ -284,6 +293,15 @@ class GmailNotifier:
         )
         self._deliver(message)
 
+    def send_test_notification(self, links: list[NotificationLink]) -> None:
+        message = EmailMessage()
+        message["Subject"] = "【テスト】Regulatory Monitor 通知確認"
+        message["From"] = self.username
+        message["To"] = ", ".join(self.recipients)
+        message.set_content(self._test_plain_body(links))
+        message.add_alternative(self._test_html_body(links), subtype="html")
+        self._deliver(message)
+
     def _deliver(self, message: EmailMessage) -> None:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
             smtp.login(self.username, self.app_password)
@@ -318,6 +336,37 @@ class GmailNotifier:
             '-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;color:#222">'
             "<h1>中央社会保険医療協議会 新着議事録</h1>"
             + "".join(cards)
+            + "</body></html>"
+        )
+
+    @staticmethod
+    def _test_plain_body(links: list[NotificationLink]) -> str:
+        sections = [
+            f"対象名: {item.target_name}\n"
+            f"リンク文字列: {item.link_text}\n"
+            f"URL: {item.url}"
+            for item in links
+        ]
+        return "Regulatory Monitorのテスト通知です。\n\n" + "\n\n".join(sections)
+
+    @staticmethod
+    def _test_html_body(links: list[NotificationLink]) -> str:
+        sections = []
+        for item in links:
+            url = html.escape(item.url, quote=True)
+            sections.append(
+                '<section style="margin:24px 0;padding:20px;border:1px solid #ddd;'
+                'border-radius:8px">'
+                f"<h2>{html.escape(item.target_name)}</h2>"
+                f"<p><strong>リンク文字列:</strong> {html.escape(item.link_text)}</p>"
+                f'<p><strong>URL:</strong> <a href="{url}">{html.escape(item.url)}</a></p>'
+                "</section>"
+            )
+        return (
+            '<!doctype html><html lang="ja"><body style="font-family:'
+            '-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;color:#222">'
+            "<h1>Regulatory Monitor テスト通知</h1>"
+            + "".join(sections)
             + "</body></html>"
         )
 
@@ -390,6 +439,39 @@ class PmdaIchMonitor:
         LOGGER.info("PMDA ICH進捗状況リンクの変更をメール送信しました。")
 
 
+class TestNotificationRunner:
+    """Send current MHLW and PMDA links without touching monitor state."""
+
+    def __init__(
+        self,
+        mhlw_scraper: MhlwScraper,
+        pmda_scraper: PmdaIchScraper,
+        notifier: GmailNotifier,
+    ) -> None:
+        self.mhlw_scraper = mhlw_scraper
+        self.pmda_scraper = pmda_scraper
+        self.notifier = notifier
+
+    def run(self) -> None:
+        latest_transcript = self.mhlw_scraper.list_transcripts()[0]
+        pmda_link = self.pmda_scraper.get_progress_link()
+        self.notifier.send_test_notification(
+            [
+                NotificationLink(
+                    target_name=f"MHLW {latest_transcript.title}",
+                    link_text="議事録",
+                    url=latest_transcript.url,
+                ),
+                NotificationLink(
+                    target_name="PMDA ICHガイドライン進捗状況",
+                    link_text=pmda_link.text,
+                    url=pmda_link.url,
+                ),
+            ]
+        )
+        LOGGER.info("現在のMHLW・PMDAリンクをテストメール送信しました。")
+
+
 def required_environment(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -413,9 +495,21 @@ def create_notifier() -> GmailNotifier:
     )
 
 
+def environment_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     http_client = HttpClient()
+    if environment_flag("SEND_TEST_EMAIL"):
+        TestNotificationRunner(
+            mhlw_scraper=MhlwScraper(http_client),
+            pmda_scraper=PmdaIchScraper(http_client),
+            notifier=create_notifier(),
+        ).run()
+        return
+
     mhlw_monitor = RegulatoryMonitor(
         scraper=MhlwScraper(HttpClient()),
         store=ProcessedUrlStore(),

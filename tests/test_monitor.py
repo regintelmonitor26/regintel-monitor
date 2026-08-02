@@ -8,13 +8,17 @@ from unittest.mock import Mock, patch
 from monitor import (
     GmailNotifier,
     MhlwScraper,
+    NotificationLink,
     PmdaIchMonitor,
     PmdaIchScraper,
     ProcessedUrlStore,
     RegulatoryMonitor,
     TrackedLink,
     TrackedLinkStore,
+    TestNotificationRunner,
     Transcript,
+    environment_flag,
+    main,
     parse_recipients,
 )
 
@@ -255,6 +259,67 @@ class PmdaIchMonitorTests(unittest.TestCase):
                 create_notifier.reset_mock()
 
 
+class TestNotificationRunnerTests(unittest.TestCase):
+    def test_sends_latest_mhlw_and_current_pmda_links_in_one_email(self):
+        mhlw_scraper = Mock()
+        mhlw_scraper.list_transcripts.return_value = [
+            Transcript("総会 第651回議事録", "https://www.mhlw.go.jp/latest"),
+            Transcript("総会 第650回議事録", "https://www.mhlw.go.jp/older"),
+        ]
+        pmda_scraper = Mock()
+        pmda_scraper.get_progress_link.return_value = TrackedLink(
+            "2026年7月30日現在の進捗状況",
+            "https://www.pmda.go.jp/current.pdf",
+        )
+        notifier = Mock()
+
+        TestNotificationRunner(mhlw_scraper, pmda_scraper, notifier).run()
+
+        notifier.send_test_notification.assert_called_once_with(
+            [
+                NotificationLink(
+                    target_name="MHLW 総会 第651回議事録",
+                    link_text="議事録",
+                    url="https://www.mhlw.go.jp/latest",
+                ),
+                NotificationLink(
+                    target_name="PMDA ICHガイドライン進捗状況",
+                    link_text="2026年7月30日現在の進捗状況",
+                    url="https://www.pmda.go.jp/current.pdf",
+                ),
+            ]
+        )
+
+    def test_environment_flag_accepts_boolean_workflow_input(self):
+        for value in ("true", "TRUE", "1", "yes", "on"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"SEND_TEST_EMAIL": value}, clear=True
+            ):
+                self.assertTrue(environment_flag("SEND_TEST_EMAIL"))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(environment_flag("SEND_TEST_EMAIL"))
+
+    @patch("monitor.TrackedLinkStore")
+    @patch("monitor.ProcessedUrlStore")
+    @patch("monitor.TestNotificationRunner")
+    @patch("monitor.create_notifier")
+    @patch("monitor.HttpClient")
+    def test_main_test_mode_does_not_construct_state_stores(
+        self,
+        http_client,
+        create_notifier,
+        runner_class,
+        processed_store,
+        tracked_store,
+    ):
+        with patch.dict(os.environ, {"SEND_TEST_EMAIL": "true"}, clear=True):
+            main()
+
+        runner_class.return_value.run.assert_called_once_with()
+        processed_store.assert_not_called()
+        tracked_store.assert_not_called()
+
+
 class GmailNotifierTests(unittest.TestCase):
     @patch("monitor.smtplib.SMTP_SSL")
     def test_send_passes_all_recipients_to_smtp_envelope(self, smtp_ssl):
@@ -340,6 +405,41 @@ class GmailNotifierTests(unittest.TestCase):
         self.assertIn("変更前のリンク文字列: old text", plain)
         self.assertIn("変更後のリンク文字列: new text", plain)
         self.assertIn("新しいURL: https://www.pmda.go.jp/new.pdf", plain)
+
+    @patch("monitor.smtplib.SMTP_SSL")
+    def test_test_email_contains_both_targets_in_one_message(self, smtp_ssl):
+        notifier = GmailNotifier(
+            username="sender@example.com",
+            app_password="test-password",
+            recipients=["recipient@example.com"],
+        )
+        links = [
+            NotificationLink(
+                "MHLW 中央社会保険医療協議会",
+                "議事録",
+                "https://www.mhlw.go.jp/latest",
+            ),
+            NotificationLink(
+                "PMDA ICHガイドライン進捗状況",
+                "現在の進捗状況",
+                "https://www.pmda.go.jp/current.pdf",
+            ),
+        ]
+
+        notifier.send_test_notification(links)
+
+        smtp = smtp_ssl.return_value.__enter__.return_value
+        self.assertEqual(smtp.send_message.call_count, 1)
+        message = smtp.send_message.call_args.args[0]
+        plain = message.get_body(preferencelist=("plain",)).get_content()
+        self.assertEqual(
+            message["Subject"],
+            "【テスト】Regulatory Monitor 通知確認",
+        )
+        for link in links:
+            self.assertIn(f"対象名: {link.target_name}", plain)
+            self.assertIn(f"リンク文字列: {link.link_text}", plain)
+            self.assertIn(f"URL: {link.url}", plain)
 
 
 if __name__ == "__main__":
