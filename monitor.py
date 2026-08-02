@@ -1,4 +1,4 @@
-"""Monitor MHLW meeting minutes, summarize new entries, and email them."""
+"""Monitor MHLW meeting minutes and email newly published links."""
 
 from __future__ import annotations
 
@@ -16,15 +16,12 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from openai import OpenAI
 
 
 LOGGER = logging.getLogger(__name__)
 TARGET_URL = "https://www.mhlw.go.jp/stf/shingi/shingi-chuo_128154.html"
 STATE_PATH = Path("data/processed_urls.json")
-DEFAULT_MODEL = "gpt-5.6-luna"
 REQUEST_TIMEOUT = 30
-SUMMARY_CHUNK_SIZE = 30_000
 USER_AGENT = "regintel-monitor/1.0 (+https://github.com/regintelmonitor26/regintel-monitor)"
 
 
@@ -34,16 +31,6 @@ class Transcript:
 
     title: str
     url: str
-    body: str = ""
-
-
-@dataclass(frozen=True)
-class SummarizedTranscript:
-    """A transcript paired with its generated Japanese summary."""
-
-    title: str
-    url: str
-    summary: str
 
 
 class HttpClient:
@@ -92,31 +79,6 @@ class MhlwScraper:
             raise RuntimeError("対象ページから「議事録」リンクを1件も抽出できませんでした。")
         return transcripts
 
-    def fetch_transcript(self, transcript: Transcript) -> Transcript:
-        page = self.http_client.get_text(transcript.url)
-        soup = BeautifulSoup(page, "html.parser")
-        content = soup.select_one("main") or soup.select_one("#content") or soup.body
-        if content is None:
-            raise RuntimeError(f"議事録本文の領域を取得できませんでした: {transcript.url}")
-
-        for unwanted in content.select(
-            "script, style, noscript, nav, header, footer, form, "
-            ".breadcrumb, .m-h, .m-footer, .p-breadcrumb"
-        ):
-            unwanted.decompose()
-
-        heading = content.find("h1")
-        title = (
-            self._normalize_text(heading.get_text(" ", strip=True))
-            if heading
-            else transcript.title
-        )
-        body = content.get_text("\n", strip=True)
-        body = re.sub(r"\n{3,}", "\n\n", body).strip()
-        if len(body) < 200:
-            raise RuntimeError(f"議事録本文が短すぎます: {transcript.url}")
-        return Transcript(title=title, url=transcript.url, body=body)
-
     @staticmethod
     def _normalize_text(value: str) -> str:
         return re.sub(r"\s+", " ", value).strip()
@@ -164,84 +126,14 @@ class ProcessedUrlStore:
         temporary_path.replace(self.path)
 
 
-class OpenAiSummarizer:
-    """Summarize long Japanese transcripts with the OpenAI Responses API."""
-
-    def __init__(self, api_key: str, model: str = DEFAULT_MODEL) -> None:
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
-
-    def summarize(self, transcript: Transcript) -> SummarizedTranscript:
-        chunks = list(self._split_text(transcript.body))
-        partial_summaries = [
-            self._create_summary(
-                "以下は会議議事録の一部です。重要な決定、論点、委員の意見、"
-                "今後の対応を、事実に忠実な日本語の箇条書きで要約してください。"
-                "本文にない情報を補わないでください。",
-                chunk,
-            )
-            for chunk in chunks
-        ]
-
-        if len(partial_summaries) == 1:
-            summary = partial_summaries[0]
-        else:
-            summary = self._create_summary(
-                "以下は同じ会議議事録を分割して要約したものです。重複を除き、"
-                "「概要」「主な議題・決定」「主な意見」「今後の対応」の見出しを"
-                "使って、簡潔で読みやすい最終要約に統合してください。",
-                "\n\n--- 分割要約 ---\n\n".join(partial_summaries),
-            )
-
-        return SummarizedTranscript(
-            title=transcript.title,
-            url=transcript.url,
-            summary=summary,
-        )
-
-    def _create_summary(self, instructions: str, content: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            reasoning={"effort": "low"},
-            instructions=instructions,
-            input=content,
-        )
-        summary = response.output_text.strip()
-        if not summary:
-            raise RuntimeError("OpenAI APIから空の要約が返されました。")
-        return summary
-
-    @staticmethod
-    def _split_text(text: str) -> Iterable[str]:
-        paragraphs = text.splitlines()
-        chunk: list[str] = []
-        length = 0
-        for paragraph in paragraphs:
-            if length + len(paragraph) + 1 > SUMMARY_CHUNK_SIZE and chunk:
-                yield "\n".join(chunk)
-                chunk = []
-                length = 0
-            while len(paragraph) > SUMMARY_CHUNK_SIZE:
-                if chunk:
-                    yield "\n".join(chunk)
-                    chunk = []
-                    length = 0
-                yield paragraph[:SUMMARY_CHUNK_SIZE]
-                paragraph = paragraph[SUMMARY_CHUNK_SIZE:]
-            chunk.append(paragraph)
-            length += len(paragraph) + 1
-        if chunk:
-            yield "\n".join(chunk)
-
-
 class GmailNotifier:
-    """Send summarized transcripts as a multipart HTML email through Gmail."""
+    """Send new transcript titles and URLs as a multipart email through Gmail."""
 
     def __init__(self, username: str, app_password: str) -> None:
         self.username = username
         self.app_password = app_password
 
-    def send(self, transcripts: list[SummarizedTranscript]) -> None:
+    def send(self, transcripts: list[Transcript]) -> None:
         message = EmailMessage()
         count = len(transcripts)
         message["Subject"] = f"【中医協】新しい議事録 {count}件"
@@ -255,19 +147,16 @@ class GmailNotifier:
             smtp.send_message(message)
 
     @staticmethod
-    def _plain_body(transcripts: list[SummarizedTranscript]) -> str:
-        sections = [
-            f"{item.title}\n{item.url}\n\n{item.summary}" for item in transcripts
-        ]
+    def _plain_body(transcripts: list[Transcript]) -> str:
+        sections = [f"{item.title}\n{item.url}" for item in transcripts]
         return "中央社会保険医療協議会の新しい議事録です。\n\n" + (
             "\n\n" + "=" * 60 + "\n\n"
         ).join(sections)
 
     @staticmethod
-    def _html_body(transcripts: list[SummarizedTranscript]) -> str:
+    def _html_body(transcripts: list[Transcript]) -> str:
         cards = []
         for item in transcripts:
-            summary = html.escape(item.summary).replace("\n", "<br>")
             title = html.escape(item.title)
             url = html.escape(item.url, quote=True)
             cards.append(
@@ -275,7 +164,6 @@ class GmailNotifier:
                 'border-radius:8px">'
                 f'<h2 style="margin-top:0">{title}</h2>'
                 f'<p><a href="{url}">厚生労働省の議事録を開く</a></p>'
-                f'<div style="line-height:1.7">{summary}</div>'
                 "</section>"
             )
         return (
@@ -288,7 +176,7 @@ class GmailNotifier:
 
 
 class RegulatoryMonitor:
-    """Coordinate discovery, first-run initialization, summaries, and delivery."""
+    """Coordinate discovery, first-run initialization, and email delivery."""
 
     def __init__(
         self,
@@ -316,20 +204,13 @@ class RegulatoryMonitor:
             LOGGER.info("新しい議事録はありません。")
             return
 
-        api_key = required_environment("OPENAI_API_KEY")
         username = required_environment("GMAIL_USERNAME")
         app_password = required_environment("GMAIL_APP_PASSWORD")
-        model = os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
-        summarizer = OpenAiSummarizer(api_key=api_key, model=model)
         notifier = GmailNotifier(username=username, app_password=app_password)
 
-        summaries = [
-            summarizer.summarize(self.scraper.fetch_transcript(item))
-            for item in new_transcripts
-        ]
-        notifier.send(summaries)
+        notifier.send(new_transcripts)
         self.store.save(processed | {item.url for item in new_transcripts})
-        LOGGER.info("新しい議事録 %d件を要約し、メール送信しました。", len(summaries))
+        LOGGER.info("新しい議事録 %d件をメール送信しました。", len(new_transcripts))
 
 
 def required_environment(name: str) -> str:

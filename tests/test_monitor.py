@@ -10,7 +10,6 @@ from monitor import (
     MhlwScraper,
     ProcessedUrlStore,
     RegulatoryMonitor,
-    SummarizedTranscript,
     Transcript,
 )
 
@@ -42,25 +41,6 @@ class MhlwScraperTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].url, "https://www.mhlw.go.jp/minutes.html")
         self.assertIn("第10回", result[0].title)
-
-    def test_extracts_readable_transcript_body(self):
-        url = "https://www.mhlw.go.jp/minutes.html"
-        page = """
-        <html><body><main><nav>navigation</nav>
-          <h1>第10回 議事録</h1>
-          <h2>議事</h2><p>{body}</p>
-          <script>ignored()</script>
-        </main></body></html>
-        """.format(body="本文です。" * 50)
-        scraper = MhlwScraper(FakeHttpClient({url: page}))
-
-        result = scraper.fetch_transcript(Transcript("fallback", url))
-
-        self.assertEqual(result.title, "第10回 議事録")
-        self.assertIn("本文です。", result.body)
-        self.assertNotIn("navigation", result.body)
-        self.assertNotIn("ignored", result.body)
-
 
 class ProcessedUrlStoreTests(unittest.TestCase):
     def test_round_trip_uses_sorted_unique_json_list(self):
@@ -97,12 +77,10 @@ class RegulatoryMonitorTests(unittest.TestCase):
                     "https://www.mhlw.go.jp/two",
                 },
             )
-            scraper.fetch_transcript.assert_not_called()
 
     @patch("monitor.GmailNotifier")
-    @patch("monitor.OpenAiSummarizer")
-    def test_later_run_processes_only_new_urls_and_saves_after_send(
-        self, summarizer_class, notifier_class
+    def test_later_run_sends_only_new_urls_and_saves_after_send(
+        self, notifier_class
     ):
         with tempfile.TemporaryDirectory() as directory:
             store = ProcessedUrlStore(Path(directory) / "processed_urls.json")
@@ -114,41 +92,48 @@ class RegulatoryMonitorTests(unittest.TestCase):
                 Transcript("old", old_url),
                 Transcript("new", new_url),
             ]
-            scraper.fetch_transcript.return_value = Transcript(
-                "new", new_url, "body"
-            )
-            summarizer_class.return_value.summarize.return_value = (
-                SummarizedTranscript("new", new_url, "summary")
-            )
 
             environment = {
-                "OPENAI_API_KEY": "test-key",
                 "GMAIL_USERNAME": "sender@example.com",
                 "GMAIL_APP_PASSWORD": "test-password",
             }
             with patch.dict(os.environ, environment, clear=True):
                 RegulatoryMonitor(scraper, store).run()
 
-            scraper.fetch_transcript.assert_called_once()
-            notifier_class.return_value.send.assert_called_once()
+            notifier_class.return_value.send.assert_called_once_with(
+                [Transcript("new", new_url)]
+            )
             self.assertEqual(store.load(), {old_url, new_url})
+
+    @patch("monitor.GmailNotifier")
+    def test_no_new_urls_does_not_send_email(self, notifier_class):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProcessedUrlStore(Path(directory) / "processed_urls.json")
+            url = "https://www.mhlw.go.jp/existing"
+            store.save([url])
+            scraper = Mock()
+            scraper.list_transcripts.return_value = [Transcript("existing", url)]
+
+            with patch.dict(os.environ, {}, clear=True):
+                RegulatoryMonitor(scraper, store).run()
+
+            notifier_class.assert_not_called()
 
 
 class GmailNotifierTests(unittest.TestCase):
-    def test_html_body_escapes_remote_content(self):
+    def test_html_body_contains_title_and_url_and_escapes_content(self):
         body = GmailNotifier._html_body(
             [
-                SummarizedTranscript(
+                Transcript(
                     title="<script>alert(1)</script>",
                     url='https://example.com/?q="bad"',
-                    summary="<b>not markup</b>",
                 )
             ]
         )
 
         self.assertNotIn("<script>", body)
-        self.assertNotIn("<b>not markup</b>", body)
-        self.assertIn("&lt;b&gt;not markup&lt;/b&gt;", body)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+        self.assertIn("https://example.com/?q=&quot;bad&quot;", body)
 
 
 if __name__ == "__main__":
