@@ -8,8 +8,12 @@ from unittest.mock import Mock, patch
 from monitor import (
     GmailNotifier,
     MhlwScraper,
+    PmdaIchMonitor,
+    PmdaIchScraper,
     ProcessedUrlStore,
     RegulatoryMonitor,
+    TrackedLink,
+    TrackedLinkStore,
     Transcript,
     parse_recipients,
 )
@@ -64,6 +68,41 @@ class MhlwScraperTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "本文領域"):
             scraper.list_transcripts(index_url)
 
+
+class PmdaIchScraperTests(unittest.TestCase):
+    def test_extracts_only_first_link_after_heading_in_main_content(self):
+        page_url = "https://www.pmda.go.jp/ich/index.html"
+        html = """
+        <header><a href="/header.pdf">header</a></header>
+        <nav><h3>ガイドラインの進捗状況</h3><a href="/breadcrumb.pdf">wrong</a></nav>
+        <main>
+          <a href="/before.pdf">before</a>
+          <h3>ガイドラインの進捗状況</h3>
+          <p><a href="/first.pdf">2026年7月30日現在の進捗状況 [215.47KB]</a></p>
+          <p><a href="/second.pdf">second</a></p>
+        </main>
+        <footer><a href="/footer.pdf">footer</a></footer>
+        """
+        scraper = PmdaIchScraper(FakeHttpClient({page_url: html}))
+
+        result = scraper.get_progress_link(page_url)
+
+        self.assertEqual(
+            result,
+            TrackedLink(
+                text="2026年7月30日現在の進捗状況 [215.47KB]",
+                url="https://www.pmda.go.jp/first.pdf",
+            ),
+        )
+
+    def test_requires_the_progress_heading(self):
+        page_url = "https://www.pmda.go.jp/ich/index.html"
+        scraper = PmdaIchScraper(FakeHttpClient({page_url: "<main></main>"}))
+
+        with self.assertRaisesRegex(RuntimeError, "ガイドラインの進捗状況"):
+            scraper.get_progress_link(page_url)
+
+
 class ProcessedUrlStoreTests(unittest.TestCase):
     def test_round_trip_uses_sorted_unique_json_list(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -76,6 +115,22 @@ class ProcessedUrlStoreTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
                 ["https://a", "https://b"],
+            )
+
+
+class TrackedLinkStoreTests(unittest.TestCase):
+    def test_round_trip_preserves_text_and_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data" / "pmda_ich_link.json"
+            store = TrackedLinkStore(path)
+            link = TrackedLink("現在の進捗状況", "https://www.pmda.go.jp/current.pdf")
+
+            store.save(link)
+
+            self.assertEqual(store.load(), link)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                {"text": link.text, "url": link.url},
             )
 
 
@@ -147,6 +202,59 @@ class RegulatoryMonitorTests(unittest.TestCase):
             notifier_class.assert_not_called()
 
 
+class PmdaIchMonitorTests(unittest.TestCase):
+    @patch("monitor.create_notifier")
+    def test_first_run_saves_current_link_without_email(self, create_notifier):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TrackedLinkStore(Path(directory) / "pmda.json")
+            current = TrackedLink("current", "https://www.pmda.go.jp/current.pdf")
+            scraper = Mock()
+            scraper.get_progress_link.return_value = current
+
+            PmdaIchMonitor(scraper, store).run()
+
+            self.assertEqual(store.load(), current)
+            create_notifier.assert_not_called()
+
+    @patch("monitor.create_notifier")
+    def test_unchanged_link_does_not_send_email(self, create_notifier):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TrackedLinkStore(Path(directory) / "pmda.json")
+            current = TrackedLink("current", "https://www.pmda.go.jp/current.pdf")
+            store.save(current)
+            scraper = Mock()
+            scraper.get_progress_link.return_value = current
+
+            PmdaIchMonitor(scraper, store).run()
+
+            create_notifier.assert_not_called()
+            self.assertEqual(store.load(), current)
+
+    @patch("monitor.create_notifier")
+    def test_text_or_url_change_sends_email_and_updates_state(self, create_notifier):
+        changes = [
+            TrackedLink("new text", "https://www.pmda.go.jp/old.pdf"),
+            TrackedLink("old text", "https://www.pmda.go.jp/new.pdf"),
+        ]
+        for current in changes:
+            with self.subTest(current=current), tempfile.TemporaryDirectory() as directory:
+                store = TrackedLinkStore(Path(directory) / "pmda.json")
+                previous = TrackedLink(
+                    "old text", "https://www.pmda.go.jp/old.pdf"
+                )
+                store.save(previous)
+                scraper = Mock()
+                scraper.get_progress_link.return_value = current
+                notifier = Mock()
+                create_notifier.return_value = notifier
+
+                PmdaIchMonitor(scraper, store).run()
+
+                notifier.send_pmda_change.assert_called_once_with(previous, current)
+                self.assertEqual(store.load(), current)
+                create_notifier.reset_mock()
+
+
 class GmailNotifierTests(unittest.TestCase):
     @patch("monitor.smtplib.SMTP_SSL")
     def test_send_passes_all_recipients_to_smtp_envelope(self, smtp_ssl):
@@ -212,6 +320,26 @@ class GmailNotifierTests(unittest.TestCase):
         self.assertNotIn("<script>", body)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
         self.assertIn("https://example.com/?q=&quot;bad&quot;", body)
+
+    @patch("monitor.smtplib.SMTP_SSL")
+    def test_pmda_email_contains_previous_current_and_new_url(self, smtp_ssl):
+        notifier = GmailNotifier(
+            username="sender@example.com",
+            app_password="test-password",
+            recipients=["recipient@example.com"],
+        )
+        previous = TrackedLink("old text", "https://www.pmda.go.jp/old.pdf")
+        current = TrackedLink("new text", "https://www.pmda.go.jp/new.pdf")
+
+        notifier.send_pmda_change(previous, current)
+
+        smtp = smtp_ssl.return_value.__enter__.return_value
+        message = smtp.send_message.call_args.args[0]
+        plain = message.get_body(preferencelist=("plain",)).get_content()
+        self.assertIn("PMDA ICHガイドライン進捗状況", plain)
+        self.assertIn("変更前のリンク文字列: old text", plain)
+        self.assertIn("変更後のリンク文字列: new text", plain)
+        self.assertIn("新しいURL: https://www.pmda.go.jp/new.pdf", plain)
 
 
 if __name__ == "__main__":
