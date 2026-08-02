@@ -2,6 +2,8 @@ name: Run regulatory monitor
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 21 * * 4' # JST Friday 06:00
 
 permissions:
   contents: write
