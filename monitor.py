@@ -49,7 +49,7 @@ class HttpClient:
 
 
 class MhlwScraper:
-    """Extract transcript links and readable transcript text from MHLW HTML."""
+    """Extract transcript links from meeting-table rows in MHLW main content."""
 
     def __init__(self, http_client: HttpClient) -> None:
         self.http_client = http_client
@@ -57,23 +57,34 @@ class MhlwScraper:
     def list_transcripts(self, index_url: str = TARGET_URL) -> list[Transcript]:
         page = self.http_client.get_text(index_url)
         soup = BeautifulSoup(page, "html.parser")
+        content = (
+            soup.select_one("main#content")
+            or soup.select_one("main")
+            or soup.select_one("#content")
+        )
+        if content is None:
+            raise RuntimeError("対象ページの本文領域を特定できませんでした。")
+
         transcripts: list[Transcript] = []
         seen: set[str] = set()
 
-        for anchor in soup.select("a[href]"):
-            label = self._normalize_text(anchor.get_text(" ", strip=True))
-            if label != "議事録":
-                continue
+        for row in content.select("table tr"):
+            for anchor in row.select("a[href]"):
+                label = self._normalize_text(anchor.get_text(" ", strip=True))
+                if label != "議事録":
+                    continue
 
-            url = urljoin(index_url, anchor["href"])
-            if not self._is_mhlw_http_url(url) or url in seen:
-                continue
+                url = urljoin(index_url, anchor["href"])
+                if not self._is_mhlw_http_url(url) or url in seen:
+                    continue
 
-            row = anchor.find_parent("tr")
-            row_text = self._normalize_text(row.get_text(" ", strip=True)) if row else ""
-            title = self._title_from_row(row_text) or "中央社会保険医療協議会 議事録"
-            transcripts.append(Transcript(title=title, url=url))
-            seen.add(url)
+                row_text = self._normalize_text(row.get_text(" ", strip=True))
+                title = (
+                    self._title_from_row(row_text)
+                    or "中央社会保険医療協議会 議事録"
+                )
+                transcripts.append(Transcript(title=title, url=url))
+                seen.add(url)
 
         if not transcripts:
             raise RuntimeError("対象ページから「議事録」リンクを1件も抽出できませんでした。")

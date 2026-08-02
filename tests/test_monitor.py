@@ -27,13 +27,22 @@ class MhlwScraperTests(unittest.TestCase):
     def test_extracts_only_exact_minutes_links_and_deduplicates(self):
         index_url = "https://www.mhlw.go.jp/index.html"
         html = """
-        <table>
-          <tr><td>第10回</td><td><a href="/minutes.html">議事録</a></td></tr>
-          <tr><td>第10回</td><td><a href="/minutes.html"> 議事録 </a></td></tr>
-          <tr><td>第9回</td><td><a href="/summary.html">議事要旨</a></td></tr>
-          <tr><td>第8回</td><td><a href="/files.pdf">資料</a></td></tr>
-          <tr><td>第7回</td><td><a href="https://example.com/x">議事録</a></td></tr>
-        </table>
+        <header><a href="/header-minutes.html">議事録</a></header>
+        <nav><a href="/breadcrumb-minutes.html">議事録</a></nav>
+        <main id="content">
+          <aside><a href="/right-menu-minutes.html">議事録</a></aside>
+          <a href="/outside-table.html">議事録</a>
+          <table>
+            <tr><td>第10回</td><td><a href="/minutes.html">議事録</a></td></tr>
+            <tr><td>第10回</td><td><a href="/minutes.html"> 議事録 </a></td></tr>
+            <tr><td>第9回</td><td><a href="/summary.html">議事要旨</a></td></tr>
+            <tr><td>第8回</td><td><a href="/files.pdf">資料</a></td></tr>
+            <tr><td>第7回</td><td><a href="https://example.com/x">議事録</a></td></tr>
+          </table>
+        </main>
+        <footer>
+          <table><tr><td><a href="/footer-minutes.html">議事録</a></td></tr></table>
+        </footer>
         """
         scraper = MhlwScraper(FakeHttpClient({index_url: html}))
 
@@ -42,6 +51,18 @@ class MhlwScraperTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].url, "https://www.mhlw.go.jp/minutes.html")
         self.assertIn("第10回", result[0].title)
+
+    def test_requires_a_main_or_content_region(self):
+        index_url = "https://www.mhlw.go.jp/index.html"
+        html = """
+        <table>
+          <tr><td>第10回</td><td><a href="/minutes.html">議事録</a></td></tr>
+        </table>
+        """
+        scraper = MhlwScraper(FakeHttpClient({index_url: html}))
+
+        with self.assertRaisesRegex(RuntimeError, "本文領域"):
+            scraper.list_transcripts(index_url)
 
 class ProcessedUrlStoreTests(unittest.TestCase):
     def test_round_trip_uses_sorted_unique_json_list(self):
