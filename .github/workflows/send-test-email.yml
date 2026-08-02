@@ -2,9 +2,6 @@ name: Send Gmail test email
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -33,15 +30,10 @@ jobs:
               if address.strip()
           ] or [username]
 
-          print(f"GMAIL_RECIPIENTS is empty: {not bool(raw_recipients.strip())}")
-          print(f"recipients count: {len(recipients)}")
-          print(f"recipients: {recipients}")
-
           message = EmailMessage()
           message["Subject"] = "GitHub Actions test email"
           message["From"] = username
           message["To"] = ", ".join(recipients)
-          print(f'message["To"]: {message["To"]}')
           message.set_content(
               "This is a test email sent from GitHub Actions using Gmail SMTP."
           )
