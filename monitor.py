@@ -129,16 +129,22 @@ class ProcessedUrlStore:
 class GmailNotifier:
     """Send new transcript titles and URLs as a multipart email through Gmail."""
 
-    def __init__(self, username: str, app_password: str) -> None:
+    def __init__(
+        self,
+        username: str,
+        app_password: str,
+        recipients: list[str],
+    ) -> None:
         self.username = username
         self.app_password = app_password
+        self.recipients = recipients
 
     def send(self, transcripts: list[Transcript]) -> None:
         message = EmailMessage()
         count = len(transcripts)
         message["Subject"] = f"【中医協】新しい議事録 {count}件"
         message["From"] = self.username
-        message["To"] = self.username
+        message["To"] = ", ".join(self.recipients)
         message.set_content(self._plain_body(transcripts))
         message.add_alternative(self._html_body(transcripts), subtype="html")
 
@@ -206,7 +212,12 @@ class RegulatoryMonitor:
 
         username = required_environment("GMAIL_USERNAME")
         app_password = required_environment("GMAIL_APP_PASSWORD")
-        notifier = GmailNotifier(username=username, app_password=app_password)
+        recipients = parse_recipients(os.getenv("GMAIL_RECIPIENTS"), username)
+        notifier = GmailNotifier(
+            username=username,
+            app_password=app_password,
+            recipients=recipients,
+        )
 
         notifier.send(new_transcripts)
         self.store.save(processed | {item.url for item in new_transcripts})
@@ -218,6 +229,13 @@ def required_environment(name: str) -> str:
     if not value:
         raise RuntimeError(f"環境変数 {name} が設定されていません。")
     return value
+
+
+def parse_recipients(value: str | None, fallback: str) -> list[str]:
+    """Parse comma-separated recipients, falling back when none are configured."""
+    recipients = [address.strip() for address in (value or "").split(",")]
+    recipients = [address for address in recipients if address]
+    return recipients or [fallback]
 
 
 def main() -> None:

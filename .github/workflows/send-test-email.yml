@@ -14,6 +14,7 @@ jobs:
         env:
           GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
         run: |
           python - <<'PY'
           import os
@@ -22,11 +23,16 @@ jobs:
 
           username = os.environ["GMAIL_USERNAME"]
           app_password = os.environ["GMAIL_APP_PASSWORD"]
+          recipients = [
+              address.strip()
+              for address in os.getenv("GMAIL_RECIPIENTS", "").split(",")
+              if address.strip()
+          ] or [username]
 
           message = EmailMessage()
           message["Subject"] = "GitHub Actions test email"
           message["From"] = username
-          message["To"] = username
+          message["To"] = ", ".join(recipients)
           message.set_content(
               "This is a test email sent from GitHub Actions using Gmail SMTP."
           )

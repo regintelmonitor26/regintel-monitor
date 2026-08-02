@@ -22,10 +22,19 @@ https://www.mhlw.go.jp/stf/shingi/shingi-chuo_128154.html
 
 | Secret | 内容 |
 | --- | --- |
-| `GMAIL_USERNAME` | 送信元兼送信先のGmailアドレス |
+| `GMAIL_USERNAME` | 送信元のGmailアドレス |
 | `GMAIL_APP_PASSWORD` | Gmailのアプリパスワード |
+| `GMAIL_RECIPIENTS` | 送信先。複数の場合はカンマ区切り（未設定時は`GMAIL_USERNAME`） |
 
 Gmailアカウントでは2段階認証を有効にし、通常のログインパスワードではなくアプリパスワードを使用してください。
+
+複数の送信先を指定する例:
+
+```text
+GMAIL_RECIPIENTS=regintel.monitor26@gmail.com,hideki.jinguji@abbvie.com
+```
+
+`GMAIL_RECIPIENTS`の各アドレス前後の空白は無視されます。Secretを登録しない場合や値が空の場合は、`GMAIL_USERNAME`が送信先になります。
 
 ## 実行方法
 
@@ -47,6 +56,7 @@ python monitor.py
 
 - `GMAIL_USERNAME`
 - `GMAIL_APP_PASSWORD`
+- `GMAIL_RECIPIENTS`（任意。未設定時は`GMAIL_USERNAME`）
 
 ## 状態ファイル
 

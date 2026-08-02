@@ -11,6 +11,7 @@ from monitor import (
     ProcessedUrlStore,
     RegulatoryMonitor,
     Transcript,
+    parse_recipients,
 )
 
 
@@ -100,6 +101,11 @@ class RegulatoryMonitorTests(unittest.TestCase):
             with patch.dict(os.environ, environment, clear=True):
                 RegulatoryMonitor(scraper, store).run()
 
+            notifier_class.assert_called_once_with(
+                username="sender@example.com",
+                app_password="test-password",
+                recipients=["sender@example.com"],
+            )
             notifier_class.return_value.send.assert_called_once_with(
                 [Transcript("new", new_url)]
             )
@@ -121,6 +127,29 @@ class RegulatoryMonitorTests(unittest.TestCase):
 
 
 class GmailNotifierTests(unittest.TestCase):
+    def test_parse_recipients_supports_multiple_addresses_and_whitespace(self):
+        self.assertEqual(
+            parse_recipients(
+                "first@example.com, second@example.com, ,third@example.com",
+                "fallback@example.com",
+            ),
+            [
+                "first@example.com",
+                "second@example.com",
+                "third@example.com",
+            ],
+        )
+
+    def test_parse_recipients_falls_back_for_missing_or_empty_value(self):
+        self.assertEqual(
+            parse_recipients(None, "fallback@example.com"),
+            ["fallback@example.com"],
+        )
+        self.assertEqual(
+            parse_recipients(" , ", "fallback@example.com"),
+            ["fallback@example.com"],
+        )
+
     def test_html_body_contains_title_and_url_and_escapes_content(self):
         body = GmailNotifier._html_body(
             [
