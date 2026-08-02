@@ -127,6 +127,34 @@ class RegulatoryMonitorTests(unittest.TestCase):
 
 
 class GmailNotifierTests(unittest.TestCase):
+    @patch("monitor.smtplib.SMTP_SSL")
+    def test_send_passes_all_recipients_to_smtp_envelope(self, smtp_ssl):
+        recipients = ["first@example.com", "second@example.com"]
+        notifier = GmailNotifier(
+            username="sender@example.com",
+            app_password="test-password",
+            recipients=recipients,
+        )
+
+        notifier.send(
+            [Transcript("第10回 議事録", "https://www.mhlw.go.jp/minutes")]
+        )
+
+        smtp = smtp_ssl.return_value.__enter__.return_value
+        smtp.login.assert_called_once_with("sender@example.com", "test-password")
+        sent_message = smtp.send_message.call_args.args[0]
+        self.assertEqual(
+            smtp.send_message.call_args.kwargs,
+            {
+                "from_addr": "sender@example.com",
+                "to_addrs": recipients,
+            },
+        )
+        self.assertEqual(
+            sent_message["To"],
+            "first@example.com, second@example.com",
+        )
+
     def test_parse_recipients_supports_multiple_addresses_and_whitespace(self):
         self.assertEqual(
             parse_recipients(

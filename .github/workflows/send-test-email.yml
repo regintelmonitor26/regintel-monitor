@@ -23,21 +23,31 @@ jobs:
 
           username = os.environ["GMAIL_USERNAME"]
           app_password = os.environ["GMAIL_APP_PASSWORD"]
+          raw_recipients = os.getenv("GMAIL_RECIPIENTS", "")
           recipients = [
               address.strip()
-              for address in os.getenv("GMAIL_RECIPIENTS", "").split(",")
+              for address in raw_recipients.split(",")
               if address.strip()
           ] or [username]
+
+          print(f"GMAIL_RECIPIENTS is empty: {not bool(raw_recipients.strip())}")
+          print(f"recipients count: {len(recipients)}")
+          print(f"recipients: {recipients}")
 
           message = EmailMessage()
           message["Subject"] = "GitHub Actions test email"
           message["From"] = username
           message["To"] = ", ".join(recipients)
+          print(f'message["To"]: {message["To"]}')
           message.set_content(
               "This is a test email sent from GitHub Actions using Gmail SMTP."
           )
 
           with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
               smtp.login(username, app_password)
-              smtp.send_message(message)
+              smtp.send_message(
+                  message,
+                  from_addr=username,
+                  to_addrs=recipients,
+              )
           PY

@@ -150,7 +150,11 @@ class GmailNotifier:
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
             smtp.login(self.username, self.app_password)
-            smtp.send_message(message)
+            smtp.send_message(
+                message,
+                from_addr=self.username,
+                to_addrs=self.recipients,
+            )
 
     @staticmethod
     def _plain_body(transcripts: list[Transcript]) -> str:
