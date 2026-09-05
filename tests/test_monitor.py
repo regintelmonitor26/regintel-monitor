@@ -202,7 +202,7 @@ class RegulatoryMonitorTests(unittest.TestCase):
             ]
 
             with patch.dict(os.environ, {}, clear=True):
-                RegulatoryMonitor(scraper, store).run()
+                self.assertFalse(RegulatoryMonitor(scraper, store).run())
 
             self.assertEqual(
                 store.load(),
@@ -232,7 +232,7 @@ class RegulatoryMonitorTests(unittest.TestCase):
                 "GMAIL_APP_PASSWORD": "test-password",
             }
             with patch.dict(os.environ, environment, clear=True):
-                RegulatoryMonitor(scraper, store).run()
+                self.assertTrue(RegulatoryMonitor(scraper, store).run())
 
             notifier_class.assert_called_once_with(
                 username="sender@example.com",
@@ -254,7 +254,7 @@ class RegulatoryMonitorTests(unittest.TestCase):
             scraper.list_transcripts.return_value = [Transcript("existing", url)]
 
             with patch.dict(os.environ, {}, clear=True):
-                RegulatoryMonitor(scraper, store).run()
+                self.assertFalse(RegulatoryMonitor(scraper, store).run())
 
             notifier_class.assert_not_called()
 
@@ -268,7 +268,7 @@ class PmdaIchMonitorTests(unittest.TestCase):
             scraper = Mock()
             scraper.get_progress_link.return_value = current
 
-            PmdaIchMonitor(scraper, store).run()
+            self.assertFalse(PmdaIchMonitor(scraper, store).run())
 
             self.assertEqual(store.load(), current)
             create_notifier.assert_not_called()
@@ -282,7 +282,7 @@ class PmdaIchMonitorTests(unittest.TestCase):
             scraper = Mock()
             scraper.get_progress_link.return_value = current
 
-            PmdaIchMonitor(scraper, store).run()
+            self.assertFalse(PmdaIchMonitor(scraper, store).run())
 
             create_notifier.assert_not_called()
             self.assertEqual(store.load(), current)
@@ -305,7 +305,7 @@ class PmdaIchMonitorTests(unittest.TestCase):
                 notifier = Mock()
                 create_notifier.return_value = notifier
 
-                PmdaIchMonitor(scraper, store).run()
+                self.assertTrue(PmdaIchMonitor(scraper, store).run())
 
                 notifier.send_pmda_change.assert_called_once_with(previous, current)
                 self.assertEqual(store.load(), current)
@@ -335,7 +335,7 @@ class JpmaMonitorTests(unittest.TestCase):
                 TrackedLink("message", "https://www.jpma.or.jp/message")
             ]
 
-            JpmaMonitor(scraper, stores).run()
+            self.assertFalse(JpmaMonitor(scraper, stores).run())
 
             create_notifier.assert_not_called()
             self.assertTrue(all(store.exists() for store in stores.values()))
@@ -353,7 +353,7 @@ class JpmaMonitorTests(unittest.TestCase):
             scraper.get_results_links.return_value = [two, one]
             scraper.get_message_links.return_value = [two, one]
 
-            JpmaMonitor(scraper, stores).run()
+            self.assertFalse(JpmaMonitor(scraper, stores).run())
 
             create_notifier.assert_not_called()
 
@@ -374,7 +374,7 @@ class JpmaMonitorTests(unittest.TestCase):
             scraper.get_message_links.return_value = [new_message, old]
             notifier = create_notifier.return_value
 
-            JpmaMonitor(scraper, stores).run()
+            self.assertTrue(JpmaMonitor(scraper, stores).run())
 
             notifier.send_jpma_additions.assert_called_once_with(
                 {
@@ -443,6 +443,63 @@ class TestNotificationRunnerTests(unittest.TestCase):
         runner_class.return_value.run.assert_called_once_with()
         processed_store.assert_not_called()
         tracked_store.assert_not_called()
+
+
+class CompletionNotificationTests(unittest.TestCase):
+    def test_success_sends_no_updates_only_when_all_targets_have_no_updates(self):
+        from itertools import product
+
+        for results in product((False, True), repeat=3):
+            with self.subTest(results=results), patch.dict(os.environ, {}, clear=True), patch(
+                "monitor.RegulatoryMonitor"
+            ) as mhlw, patch("monitor.PmdaIchMonitor") as pmda, patch(
+                "monitor.JpmaMonitor"
+            ) as jpma, patch("monitor.create_notifier") as notifier:
+                for monitor, result in zip((mhlw, pmda, jpma), results):
+                    monitor.return_value.run.return_value = result
+
+                main()
+
+                for monitor in (mhlw, pmda, jpma):
+                    monitor.return_value.run.assert_called_once_with()
+                if any(results):
+                    notifier.assert_not_called()
+                else:
+                    notifier.return_value.send_no_updates.assert_called_once_with()
+
+    def test_monitor_failure_does_not_send_success_email(self):
+        for failed_index in range(3):
+            with self.subTest(failed_index=failed_index), patch.dict(
+                os.environ, {}, clear=True
+            ), patch("monitor.RegulatoryMonitor") as mhlw, patch(
+                "monitor.PmdaIchMonitor"
+            ) as pmda, patch("monitor.JpmaMonitor") as jpma, patch(
+                "monitor.create_notifier"
+            ) as notifier:
+                monitors = (mhlw, pmda, jpma)
+                for monitor in monitors:
+                    monitor.return_value.run.return_value = False
+                monitors[failed_index].return_value.run.side_effect = RuntimeError("failed")
+
+                with self.assertRaises(RuntimeError):
+                    main()
+
+                notifier.assert_not_called()
+
+    @patch("monitor.smtplib.SMTP_SSL")
+    def test_no_updates_email_and_delivery_failure(self, smtp_ssl):
+        notifier = GmailNotifier("sender@example.com", "password", ["recipient@example.com"])
+        notifier.send_no_updates()
+
+        smtp = smtp_ssl.return_value.__enter__.return_value
+        smtp.send_message.assert_called_once()
+        message = smtp.send_message.call_args.args[0]
+        self.assertIn("更新なし", message["Subject"])
+        self.assertIn("今回の監視では更新はありませんでした", message.get_content())
+        self.assertEqual(smtp.send_message.call_args.kwargs["to_addrs"], ["recipient@example.com"])
+        smtp.send_message.side_effect = RuntimeError("SMTP failed")
+        with self.assertRaises(RuntimeError):
+            notifier.send_no_updates()
 
 
 class GmailNotifierTests(unittest.TestCase):

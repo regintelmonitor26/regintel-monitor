@@ -417,6 +417,17 @@ class GmailNotifier:
         )
         self._deliver(message)
 
+    def send_no_updates(self) -> None:
+        message = EmailMessage()
+        message["Subject"] = "【Regulatory Monitor】監視完了：更新なし"
+        message["From"] = self.username
+        message["To"] = ", ".join(self.recipients)
+        message.set_content(
+            "すべての監視処理が正常に完了しました。\n"
+            "今回の監視では更新はありませんでした。\n"
+        )
+        self._deliver(message)
+
     def send_test_notification(self, links: list[NotificationLink]) -> None:
         message = EmailMessage()
         message["Subject"] = "【テスト】Regulatory Monitor 通知確認"
@@ -536,7 +547,7 @@ class RegulatoryMonitor:
         self.scraper = scraper
         self.store = store
 
-    def run(self) -> None:
+    def run(self) -> bool:
         discovered = self.scraper.list_transcripts()
         discovered_urls = {item.url for item in discovered}
 
@@ -546,13 +557,13 @@ class RegulatoryMonitor:
                 "初回実行: 既存の議事録 %d件を保存しました。メールは送信しません。",
                 len(discovered_urls),
             )
-            return
+            return False
 
         processed = self.store.load()
         new_transcripts = [item for item in discovered if item.url not in processed]
         if not new_transcripts:
             LOGGER.info("新しい議事録はありません。")
-            return
+            return False
 
         username = required_environment("GMAIL_USERNAME")
         app_password = required_environment("GMAIL_APP_PASSWORD")
@@ -566,6 +577,7 @@ class RegulatoryMonitor:
         notifier.send(new_transcripts)
         self.store.save(processed | {item.url for item in new_transcripts})
         LOGGER.info("新しい議事録 %d件をメール送信しました。", len(new_transcripts))
+        return True
 
 
 class PmdaIchMonitor:
@@ -575,22 +587,23 @@ class PmdaIchMonitor:
         self.scraper = scraper
         self.store = store
 
-    def run(self) -> None:
+    def run(self) -> bool:
         current = self.scraper.get_progress_link()
         if not self.store.exists():
             self.store.save(current)
             LOGGER.info("PMDA初回実行: 現在の進捗状況リンクを保存しました。")
-            return
+            return False
 
         previous = self.store.load()
         if current == previous:
             LOGGER.info("PMDA ICH進捗状況リンクに変更はありません。")
-            return
+            return False
 
         notifier = create_notifier()
         notifier.send_pmda_change(previous, current)
         self.store.save(current)
         LOGGER.info("PMDA ICH進捗状況リンクの変更をメール送信しました。")
+        return True
 
 
 class JpmaMonitor:
@@ -600,7 +613,7 @@ class JpmaMonitor:
         self.scraper = scraper
         self.stores = stores
 
-    def run(self) -> None:
+    def run(self) -> bool:
         snapshots = {
             "JPMA ICH": self.scraper.get_ich_links(),
             "JPMA 成果物一覧": self.scraper.get_results_links(),
@@ -628,6 +641,7 @@ class JpmaMonitor:
             if label not in initialized:
                 self.stores[label].save(current)
         LOGGER.info("JPMA監視を完了しました（新着対象: %d）。", len(additions))
+        return bool(additions)
 
 
 class TestNotificationRunner:
@@ -721,9 +735,11 @@ def main() -> None:
             ),
         },
     )
-    mhlw_monitor.run()
-    pmda_monitor.run()
-    jpma_monitor.run()
+    mhlw_notified = mhlw_monitor.run()
+    pmda_notified = pmda_monitor.run()
+    jpma_notified = jpma_monitor.run()
+    if not (mhlw_notified or pmda_notified or jpma_notified):
+        create_notifier().send_no_updates()
 
 
 if __name__ == "__main__":
